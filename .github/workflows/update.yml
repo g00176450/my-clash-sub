@@ -2,18 +2,15 @@ name: Update Free Clash Subscription
 
 on:
   schedule:
-    # UTC 时间，北京时间 = UTC + 8
-    # 北京时间 09:10 / 13:10 / 17:10 / 21:10 / 01:10 / 05:10
-    # 每 4 小时一次，匹配 freeclash.top 订阅轮换节奏
-    - cron: "10 1,5,9,13,17,21 * * *"
-  workflow_dispatch:        # 允许手动触发，调试用
+    - cron: "10 1,5,9,13,17,21 * * *"   # UTC，北京时间 +8，每 4 小时
+  workflow_dispatch:
 
 permissions:
-  contents: write           # 给 GITHUB_TOKEN push 权限，否则 403
+  contents: write
 
 concurrency:
   group: update-sub
-  cancel-in-progress: true  # 防止两次触发并发写仓库
+  cancel-in-progress: true
 
 jobs:
   fetch:
@@ -23,7 +20,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0                    # 拉完整历史，push 才不会报 shallow update
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
@@ -34,20 +31,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Probe possible API endpoints
-        continue-on-error: true             # 探测性调试，失败不影响主流程
-        env:
-          FREECLASH_COOKIE: ${{ secrets.FREECLASH_COOKIE }}
-        run: |
-          for path in "/api/free_clash" "/api/sub" "/api/v1/sub" "/v1/api/sub"; do
-            echo "--- Trying: $path ---"
-            code=$(curl -s -o /dev/null -w "%{http_code}" \
-              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-              -H "Cookie: $FREECLASH_COOKIE" \
-              "https://www.freeclash.top${path}" || echo "err")
-            echo "  => HTTP $code"
-          done
-
       - name: Fetch subscription
         env:
           FREECLASH_COOKIE: ${{ secrets.FREECLASH_COOKIE }}
@@ -57,19 +40,20 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # 丢弃调试运行可能改动的文件，保证只提交抓取产物
-          git fetch origin main
-          git reset --hard origin/main
-          if [ -f clash.yaml ] && [ -f v2ray.txt ]; then
-            git add clash.yaml v2ray.txt
-            if git diff --quiet --cached; then
-              echo "No changes, skip commit"
-            else
-              git commit -m "auto: update $(date -u +%Y-%m-%d_%H:%M) UTC"
-              git pull --rebase origin main
-              git push origin HEAD:main
-            fi
-          else
-            echo "Output files missing (抓取失败)，skip commit"
+          echo "===== 工作目录文件清单 ====="
+          ls -la
+          if [ ! -f clash.yaml ]; then
+            echo "::error::clash.yaml 未生成"
             exit 1
+          fi
+          git add clash.yaml
+          if [ -f v2ray.txt ]; then
+            git add v2ray.txt
+          fi
+          if git diff --cached --quiet; then
+            echo "No changes, skip commit"
+          else
+            git commit -m "auto: update $(date -u +%Y-%m-%d_%H:%M) UTC"
+            git pull --rebase origin main
+            git push origin HEAD:main
           fi
