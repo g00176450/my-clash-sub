@@ -1,0 +1,51 @@
+name: Update Free Clash Subscription
+
+on:
+  schedule:
+    - cron: "5 1 * * *"    # 北京时间 09:05
+    - cron: "5 13 * * *"   # 北京时间 21:05
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-sub
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch subscription
+        env:
+          FREECLASH_COOKIE: ${{ secrets.FREECLASH_COOKIE }}
+        run: python fetch.py
+
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet clash.yaml v2ray.txt; then
+            echo "No changes, skip commit"
+          else
+            git add clash.yaml v2ray.txt
+            git commit -m "auto: update $(date -u +%Y-%m-%d_%H:%M) UTC"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
