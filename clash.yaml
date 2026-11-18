@@ -1,0 +1,125 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+proxies:
+- name: Free VMESS Proxy Server00
+  port: 80
+  uuid: f9a527f4-6d7a-5dee-9851-b60b11dabaa0
+  server: 139.180.190.156
+  cipher: auto
+  alterId: 0
+  type: vmess
+  network: http
+  http-opts:
+    method: GET
+    path:
+    - /
+    headers:
+      Host:
+      - www.cloudflare.com
+      - www.amazon.com
+      - bing.com
+      User-Agent:
+      - Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)
+        Chrome/55.0.2883.75 Safari/537.36
+      - Mozilla/5.0 (iPhone; CPU iPhone OS 10_0_2 like Mac OS X) AppleWebKit/601.1
+        (KHTML, like Gecko) CriOS/53.0.2785.109 Mobile/14A456 Safari/601.1.46
+      Connection:
+      - keep-alive
+      Accept-Encoding:
+      - gzip
+      - deflate
+- name: Free VMESS Proxy Server01
+  port: 80
+  uuid: 940a85e8-4483-581e-897c-4715ab0c2d92
+  server: 167.179.90.70
+  cipher: auto
+  alterId: 0
+  type: vmess
+  network: http
+  http-opts:
+    method: GET
+    path:
+    - /
+    headers:
+      Host:
+      - www.cloudflare.com
+      - www.amazon.com
+      - bing.com
+      User-Agent:
+      - Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)
+        Chrome/55.0.2883.75 Safari/537.36
+      - Mozilla/5.0 (iPhone; CPU iPhone OS 10_0_2 like Mac OS X) AppleWebKit/601.1
+        (KHTML, like Gecko) CriOS/53.0.2785.109 Mobile/14A456 Safari/601.1.46
+      Connection:
+      - keep-alive
+      Accept-Encoding:
+      - gzip
+      - deflate
+- cipher: aes-256-cfb
+  name: Free SSR Proxy Server00
+  obfs: http_simple
+  obfs-param: bing.com
+  password: f9a527f4
+  port: 8891
+  protocol: origin
+  protocol-param: ''
+  server: 139.180.190.156
+  type: ssr
+- cipher: aes-256-cfb
+  name: Free SSR Proxy Server01
+  obfs: http_simple
+  obfs-param: bing.com
+  password: 940a85e8
+  port: 8892
+  protocol: origin
+  protocol-param: ''
+  server: 167.179.90.70
+  type: ssr
+- cipher: aes-256-cfb
+  name: Free SSR Proxy Server02
+  obfs: http_simple
+  obfs-param: bing.com
+  password: 59a13420
+  port: 8893
+  protocol: origin
+  protocol-param: ''
+  server: 139.180.190.156
+  type: ssr
+- cipher: aes-256-cfb
+  name: Free SSR Proxy Server03
+  obfs: http_simple
+  obfs-param: bing.com
+  password: 04775b60
+  port: 8894
+  protocol: origin
+  protocol-param: ''
+  server: 167.179.90.70
+  type: ssr
+proxy-groups:
+- name: PROXY
+  type: select
+  proxies:
+  - AUTO
+  - Free VMESS Proxy Server00
+  - Free VMESS Proxy Server01
+  - Free SSR Proxy Server00
+  - Free SSR Proxy Server01
+  - Free SSR Proxy Server02
+  - Free SSR Proxy Server03
+- name: AUTO
+  type: url-test
+  proxies:
+  - Free VMESS Proxy Server00
+  - Free VMESS Proxy Server01
+  - Free SSR Proxy Server00
+  - Free SSR Proxy Server01
+  - Free SSR Proxy Server02
+  - Free SSR Proxy Server03
+  url: http://www.gstatic.com/generate_204
+  interval: 300
+rules:
+- DOMAIN-SUFFIX,cn,DIRECT
+- GEOIP,CN,DIRECT
+- MATCH,PROXY
