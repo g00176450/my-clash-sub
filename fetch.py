@@ -5,7 +5,7 @@ import base64, concurrent.futures, json, os, pathlib, re, socket, sys, time
 import requests, yaml
 
 BASE = "https://www.freeclash.top"
-UI = BASE + "/ui/free_clash"
+API = BASE + "/ui/api/clash_subscriptions"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 TIMEOUT = 20
@@ -30,88 +30,32 @@ def get_cookie():
 
 def session():
     s = requests.Session()
-    s.headers.update({"User-Agent": UA, "Referer": BASE,
-                      "Accept-Language": "zh-CN,zh;q=0.9"})
+    s.headers.update({
+        "User-Agent": UA,
+        "Referer": BASE + "/ui/free_clash",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json",
+    })
     s.cookies.update(get_cookie())
     return s
 
 
-def extract_api_candidates(html):
-    cands = set()
-    pats = [
-        r"""fetch\(\s*['"`]([^'"`\$]+)['"`]""",
-        r"""(?:axios|http)\.(?:get|post)\(\s*['"`]([^'"`\$]+)['"`]""",
-        r"""['"](\/[a-zA-Z0-9_\/\-]{3,80})['"]""",
-        r"""['"]([a-zA-Z0-9_\-]*api[a-zA-Z0-9_\-]*\/[a-zA-Z0-9_\/\-]*)['"]""",
-    ]
-    for pat in pats:
-        for m in re.finditer(pat, html):
-            path = m.group(1)
-            if not path.startswith(("/v1/", "/v2/", "http", "#", "mailto")):
-                continue
-            if any(k in path.lower() for k in
-                   ("api", "sub", "free", "clash", "vmess",
-                    "hysteria", "ssr", "node", "daily")):
-                cands.add(path)
-            elif "/api/" in path or path.startswith("/api"):
-                cands.add(path)
-    return sorted(cands)
-
-
-def try_api(s, path):
-    url = path if path.startswith("http") else BASE + path
-    h = {"X-Requested-With": "XMLHttpRequest",
-         "Accept": "application/json, text/javascript, */*; q=0.01"}
-    try:
-        r = s.get(url, timeout=TIMEOUT, headers=h)
-        body = r.text
-        print("[API]", url, "->", r.status_code, "len:", len(body))
-        ct = r.headers.get("content-type", "")
-        if "json" in ct or body.strip().startswith(("{", "[")):
-            try:
-                return r.json()
-            except Exception:
-                pass
-        if r.status_code == 200 and 0 < len(body) < 3000:
-            print("[BODY]", body[:600])
-    except Exception as e:
-        print("[API-ERR]", url, str(e)[:100])
-    return None
-
-
-def find_sub_urls(obj, depth=0):
-    out = []
-    if depth > 6:
-        return out
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, str) and (
-                    "/v1/sub/" in v or v.startswith("http")):
-                if k in ("subscription_url", "sub_url", "url",
-                         "link", "subscriptionUrl"):
-                    out.append(v)
-            else:
-                out.extend(find_sub_urls(v, depth + 1))
-    elif isinstance(obj, list):
-        for it in obj:
-            out.extend(find_sub_urls(it, depth + 1))
-    return out
-
-
-def probe_common_paths(s):
-    extra = [
-        "/api/free_clash", "/api/sub/free", "/api/subscriptions",
-        "/api/v1/subscriptions", "/ui/api/free_clash",
-        "/api/clash/free", "/free_clash/api", "/api/free_sub",
-        UI + "?json=1", UI + "?api=1",
-    ]
-    for p in extra:
-        d = try_api(s, p)
-        if d:
-            subs = find_sub_urls(d)
-            if subs:
-                return subs
-    return []
+def get_subscription_urls(s):
+    r = s.get(API, timeout=TIMEOUT)
+    r.raise_for_status()
+    print("[OK] API status:", r.status_code, "len:", len(r.text))
+    data = r.json()
+    subs = data.get("subscriptions", [])
+    print("[OK] subscriptions count:", len(subs))
+    for sub in subs:
+        print("   -", sub.get("proxy_type", "?"), ":",
+              str(sub.get("subscription_url", ""))[:80])
+    urls = [sub["subscription_url"] for sub in subs
+            if sub.get("subscription_url")]
+    if not urls:
+        print("[DBG] raw:", json.dumps(data, ensure_ascii=False)[:800])
+        raise RuntimeError("no subscription_url in response")
+    return urls
 
 
 def test_node_tcp(node):
@@ -179,89 +123,64 @@ def write_v2ray_base64(proxies):
                     q, p.get("name", "")))
         except Exception as e:
             print("[WARN] convert failed:", t, e)
-    V2RAY_OUT.write_text(
-        base64.b64encode("\n".join(lines).encode()).decode(), encoding="utf-8")
+    body = "\n".join(lines).encode("utf-8")
+    V2RAY_OUT.write_text(base64.b64encode(body).decode("ascii"),
+                         encoding="utf-8")
     print("[OK] wrote v2ray.txt with", len(lines), "links")
 
 
-def process(url, s):
+def fetch_and_parse(s, url):
     r = s.get(url, timeout=TIMEOUT,
               headers={"User-Agent": "clash-verge/v2.0.0"})
     r.raise_for_status()
     body = r.text
     if "访问验证" in body:
-        raise RuntimeError("subscription blocked")
+        raise RuntimeError("subscription blocked: " + url)
     data = yaml.safe_load(body)
     if not isinstance(data, dict) or not data.get("proxies"):
-        print("[DBG] body head 500:", body[:500])
-        raise RuntimeError("no proxies in yaml")
-    proxies = data["proxies"]
-    print("[OK] got", len(proxies), "proxies")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        alive = [n for n, ok in zip(proxies,
-                 pool.map(test_node_tcp, proxies)) if ok]
-    print("[OK] alive:", len(alive), "/", len(proxies))
-    if not alive:
-        print("[WARN] all dead, fallback to full list")
-        alive = proxies
-    write_clash_yaml(alive)
-    write_v2ray_base64(alive)
-    print("[CHECK] clash.yaml exists:", CLASH_OUT.exists())
-    print("[DONE]")
+        print("[DBG] body head:", body[:400])
+        raise RuntimeError("no proxies in yaml from: " + url)
+    print("[OK] got", len(data["proxies"]), "proxies from",
+          url.split("/")[-1][:20])
+    return data["proxies"]
 
 
 def main():
+    start = time.time()
     s = session()
-    r = s.get(UI, timeout=TIMEOUT)
-    r.raise_for_status()
-    html = r.text
-    print("[DBG] page length:", len(html))
-    if "访问验证" in html:
-        raise RuntimeError("cookie expired")
 
-    m = re.search(r"/v1/sub/(?:vmess|hysteria2?|ssr)/\d+/[A-Za-z0-9_\-]{10,}",
-                  html.replace("\\/", "/"))
-    if m:
-        url = m.group(0)
-        print("[OK] direct regex hit:", url)
-        process(url if url.startswith("http") else BASE + url, s)
-        return
+    urls = get_subscription_urls(s)
+    all_proxies = []
+    for u in urls:
+        try:
+            all_proxies.extend(fetch_and_parse(s, u))
+        except Exception as e:
+            print("[WARN] skip url:", str(e)[:120])
 
-    print("[DBG] no direct match, extracting API candidates...")
-    cands = extract_api_candidates(html)
-    print("[DBG] candidates:", len(cands))
-    for c in cands:
-        print("   -", c)
+    if not all_proxies:
+        raise RuntimeError("no proxies from any subscription")
 
-    all_subs = []
-    for path in cands:
-        d = try_api(s, path)
-        if not d:
-            continue
-        subs = find_sub_urls(d)
-        if subs:
-            print("[OK] found", len(subs), "subs in", path)
-            for u in subs:
-                print("   *", u)
-            all_subs.extend(subs)
+    # 按 (server, port, type) 去重
+    seen, uniq = set(), []
+    for p in all_proxies:
+        key = (p.get("server"), p.get("port"), p.get("type"))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    print("[OK] unique proxies:", len(uniq))
 
-    if not all_subs:
-        print("[DBG] trying common API paths...")
-        all_subs = probe_common_paths(s)
+    print("[OK] testing alive...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        alive = [n for n, ok in zip(uniq, pool.map(test_node_tcp, uniq)) if ok]
+    print("[OK] alive:", len(alive), "/", len(uniq))
+    if not alive:
+        print("[WARN] all dead, fallback to full list")
+        alive = uniq
 
-    if not all_subs:
-        print("[DBG] ===== full inline scripts =====")
-        for m in re.finditer(r"<script[^>]*>(.*?)</script>", html, re.S):
-            body = m.group(1).strip()
-            if body:
-                print("---- script ----")
-                print(body)
-        raise RuntimeError("no api returned subscription, see scripts above")
-
-    vmess = [u for u in all_subs if "/vmess/" in u]
-    url = vmess[0] if vmess else all_subs[0]
-    print("[OK] selected:", url)
-    process(url, s)
+    write_clash_yaml(alive)
+    write_v2ray_base64(alive)
+    print("[CHECK] clash.yaml exists:", CLASH_OUT.exists())
+    print("[DONE] elapsed:", round(time.time() - start, 1), "s")
 
 
 if __name__ == "__main__":
