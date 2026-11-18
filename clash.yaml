@@ -5,7 +5,7 @@ log-level: info
 proxies:
 - name: Free VMESS Proxy Server00
   port: 80
-  uuid: f9a527f4-6d7a-5dee-9851-b60b11dabaa0
+  uuid: 789f26eb-44c7-531b-87e3-ac49affd9e40
   server: 139.180.190.156
   cipher: auto
   alterId: 0
@@ -32,7 +32,7 @@ proxies:
       - deflate
 - name: Free VMESS Proxy Server01
   port: 80
-  uuid: 940a85e8-4483-581e-897c-4715ab0c2d92
+  uuid: 9746f77d-cfc4-5b77-b296-7f0a04a64766
   server: 167.179.90.70
   cipher: auto
   alterId: 0
@@ -61,7 +61,7 @@ proxies:
   name: Free SSR Proxy Server00
   obfs: http_simple
   obfs-param: bing.com
-  password: f9a527f4
+  password: 789f26eb
   port: 8891
   protocol: origin
   protocol-param: ''
@@ -71,7 +71,7 @@ proxies:
   name: Free SSR Proxy Server01
   obfs: http_simple
   obfs-param: bing.com
-  password: 940a85e8
+  password: 9746f77d
   port: 8892
   protocol: origin
   protocol-param: ''
@@ -81,7 +81,7 @@ proxies:
   name: Free SSR Proxy Server02
   obfs: http_simple
   obfs-param: bing.com
-  password: 59a13420
+  password: cbec6885
   port: 8893
   protocol: origin
   protocol-param: ''
@@ -91,7 +91,7 @@ proxies:
   name: Free SSR Proxy Server03
   obfs: http_simple
   obfs-param: bing.com
-  password: 04775b60
+  password: b2ea206d
   port: 8894
   protocol: origin
   protocol-param: ''
