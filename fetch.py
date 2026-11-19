@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests, yaml
 from playwright.sync_api import sync_playwright
 
-SITE_URL    = "https://www.freeclash.top/"
+SITE_URL    = "https://www.freeclash.top/ui/free_clash"
 SITE_COOKIE = os.environ.get("FREECLASH_COOKIE", "").strip()
 TCP_TIMEOUT, TCP_WORKERS = 5, 30
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
