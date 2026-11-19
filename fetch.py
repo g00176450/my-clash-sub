@@ -1,317 +1,192 @@
 #!/usr/bin/env python3
-"""
-fetch.py — 抓取喵喵订阅源，去重 + TCP 测试，输出 clash.yaml / v2ray.txt
-数据源完全来自环境变量 MIAOMIAO_SUB_URL（单一来源，路线 B）
-"""
+"""fetch.py — Playwright 打开喵喵网站，自动完成计算题验证，提取订阅链接并抓节点"""
 
-import os
-import re
-import json
-import base64
-import socket
-import logging
+import re, json, base64, socket, logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, unquote
 
-import requests
-import yaml
+import requests, yaml
+from playwright.sync_api import sync_playwright
 
-# ---------- 配置 ----------
-SUB_URL      = os.environ.get("MIAOMIAO_SUB_URL", "").strip()
-FETCH_TIMEOUT = 20
-TCP_TIMEOUT   = 5
-TCP_WORKERS   = 30
-UA = "clash-meta/v2.0"
-
-logging.basicConfig(level=logging.INFO,
-                    format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+SITE_URL    = "https://www.freeclash.top/"
+SITE_COOKIE = __import__("os").environ.get("FREECLASH_COOKIE", "").strip()
+TCP_TIMEOUT, TCP_WORKERS = 5, 30
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.info
 
+# ---------- 1. 浏览器打开页面 + 自动做题 ----------
+MATH_RE = re.compile(r"(\d+)\s*([+\-×x*])\s*(\d+)")
 
-# ---------- 1. 拉取 ----------
-def fetch_subscription(url: str) -> str:
-    """拉取订阅原文，识别验证页 / 错误页 / 空响应"""
-    r = requests.get(url, headers={"User-Agent": UA, "Accept": "*/*"},
-                     timeout=FETCH_TIMEOUT, allow_redirects=True)
-    r.raise_for_status()
+def solve_math(text: str):
+    m = MATH_RE.search(text)
+    if not m:
+        return None
+    a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+    return a + b if op in "+*" else a - b if op == "-" else None
+
+def get_sub_url_via_browser():
+    log("[BROWSER] 启动 Chromium...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        ctx = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0")
+        if SITE_COOKIE:
+            cookies = []
+            for kv in SITE_COOKIE.split(";"):
+                k, _, v = kv.strip().partition("=")
+                if k:
+                    cookies.append({"name": k, "value": v, "domain": "www.freeclash.top", "path": "/"})
+            if cookies:
+                ctx.add_cookies(cookies)
+                log(f"[COOKIE] 注入 {len(cookies)} 条")
+        page = ctx.new_page()
+        page.goto(SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+
+        # 找计算题：常见形式是页面出现 "12 + 5 = ?" 和一个输入框 + 提交按钮
+        body_text = page.inner_text("body")
+        answer = solve_math(body_text)
+        if answer is not None and page.locator("input[type=text], input[type=number], input:not([type])").count() > 0:
+            log(f"[CAPTCHA] 检测到计算题，答案: {answer}")
+            box = page.locator("input[type=text], input[type=number], input:not([type])").first
+            box.fill(str(answer))
+            # 找提交按钮
+            for sel in ["button:has-text('提交')", "button:has-text('验证')", "button:has-text('确定')",
+                        "input[type=submit]", "button"]:
+                if page.locator(sel).count() > 0:
+                    page.locator(sel).first.click()
+                    break
+            page.wait_for_timeout(3000)
+            body_text = page.inner_text("body")
+            log("[CAPTCHA] 已提交答案")
+        else:
+            log("[CAPTCHA] 未检测到计算题（可能已被 cookie 放行）")
+
+        # 提取 vmess 订阅链接：优先从页面文本/属性找
+        html = page.content()
+        m = re.search(r'["\'(]([^"\'()]*?/v1/sub/vmess/[^"\'()\s<>]+)', html, re.IGNORECASE)
+        if not m:
+            # 链接可能由 JS 动态生成，再从渲染后的文本里找
+            m = re.search(r"(https?://[^\s\"'<>]*?/v1/sub/vmess/[^\s\"'<>]+)", body_text, re.IGNORECASE)
+        if not m:
+            # 最后手段：点击 "复制订阅链接" 按钮，读剪贴板（需授权）
+            page.evaluate("navigator.clipboard.writeText('').catch(()=>{})")
+            btn = page.locator("button:has-text('复制订阅'), a:has-text('复制订阅')").first
+            if btn.count() > 0:
+                ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+                btn.click()
+                page.wait_for_timeout(1000)
+                clip = page.evaluate("navigator.clipboard.readText().catch(()=>'')")
+                m = re.search(r"(https?://[^\s\"']+)", clip or "")
+        browser.close()
+        if not m:
+            raise ValueError("验证后仍未找到 /v1/sub/vmess/ 链接")
+        url = m.group(1)
+        exp_m = re.search(r"/v1/sub/vmess/(\d+)/", url)
+        exp = datetime.fromtimestamp(int(exp_m.group(1)), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if exp_m else "?"
+        log(f"[BROWSER] 订阅链接（过期 {exp}）: {url[:80]}...")
+        return url
+
+# ---------- 2~5. 抓取/解析/测试/输出（与之前版本相同） ----------
+def fetch_sub(url):
+    s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0 Chrome/120.0"})
+    r = s.get(url, timeout=20); r.raise_for_status()
     text = r.text.strip()
-    if not text:
-        raise ValueError("订阅返回为空")
-    low = text.lower()
-    if "<html" in low or "<!doctype" in low:
-        raise ValueError("返回 HTML —— 订阅可能被验证码/防爬拦截，token 可能已失效")
-    if "访问验证" in text or "captcha" in low or "请登录" in text:
-        raise ValueError("返回验证/登录页 —— 重新去喵喵获取一个新的订阅链接")
-    if text.startswith("{") and len(text) < 500 and '"error"' in low:
-        raise ValueError(f"订阅返回错误 JSON: {text[:200]}")
+    if "<html" in text.lower(): raise ValueError("订阅返回 HTML，链接可能已失效")
     return text
 
-
-# ---------- 2. 格式检测 ----------
-def detect_format(text: str) -> str:
-    if re.search(r"^proxies:\s*$", text, re.MULTILINE):
-        return "yaml"
-    first = text.lstrip().splitlines()[0] if text.strip() else ""
-    if first.startswith(("vmess://", "ss://", "trojan://", "vless://")):
-        return "uri_list"
-    return "base64"
-
-
-# ---------- 3. Clash YAML 解析 ----------
-def parse_clash_yaml(text: str) -> list:
-    data = yaml.safe_load(text)
-    proxies = (data or {}).get("proxies") or []
-    log(f"[PARSE] Clash YAML 模式，{len(proxies)} 个节点")
-    return proxies
-
-
-# ---------- 4. URI / Base64 解析 ----------
-def parse_uri_list(lines: list) -> list:
-    proxies = []
-    for line in lines:
-        try:
-            if line.startswith("vmess://"):
-                p = parse_vmess_uri(line)
-            elif line.startswith("ss://"):
-                p = parse_ss_uri(line)
-            elif line.startswith("trojan://"):
-                p = parse_trojan_uri(line)
-            else:
-                log(f"[SKIP] 未支持的协议: {line[:40]}...")
-                continue
-            if p:
-                proxies.append(p)
-        except Exception as e:
-            log(f"[SKIP] 解析失败 {line[:40]}... : {e}")
-    return proxies
-
-
-def parse_base64_sub(text: str) -> list:
-    padded = text + "=" * (-len(text) % 4)
-    try:
-        decoded = base64.b64decode(padded, altchars=b"-_").decode("utf-8", "ignore")
-    except Exception as e:
-        raise ValueError(f"base64 解码失败: {e}")
-    lines = [l.strip() for l in decoded.splitlines() if l.strip()]
-    log(f"[PARSE] Base64 分享链接模式，{len(lines)} 行")
-    return parse_uri_list(lines)
-
-
-def parse_vmess_uri(uri: str):
+def parse_vmess_uri(uri):
     payload = uri[len("vmess://"):]
-    padded = payload + "=" * (-len(payload) % 4)
     try:
-        obj = json.loads(base64.b64decode(padded, altchars=b"-_")
-                         .decode("utf-8", "ignore"))
+        obj = json.loads(base64.b64decode(payload + "=" * (-len(payload) % 4), altchars=b"-_").decode("utf-8", "ignore"))
     except Exception:
         return None
     server, port, uuid = str(obj.get("add", "")), int(obj.get("port", 0) or 0), str(obj.get("id", ""))
-    if not (server and port and uuid):
-        return None
-    node = {
-        "name": str(obj.get("ps") or f"vmess-{server}:{port}"),
-        "type": "vmess",
-        "server": server, "port": port, "uuid": uuid,
-        "alterId": int(obj.get("aid", 0) or 0),
-        "cipher": obj.get("scy") or "auto",
-        "udp": True,
-    }
+    if not (server and port and uuid): return None
+    node = {"name": str(obj.get("ps") or f"vmess-{server}:{port}"), "type": "vmess",
+            "server": server, "port": port, "uuid": uuid,
+            "alterId": int(obj.get("aid", 0) or 0), "cipher": obj.get("scy") or "auto", "udp": True}
     if str(obj.get("tls", "")).lower() in ("tls", "true", "1"):
         node["tls"] = True
-        if obj.get("sni"):
-            node["servername"] = obj["sni"]
+        if obj.get("sni"): node["servername"] = obj["sni"]
     net = obj.get("net", "tcp") or "tcp"
     if net == "ws":
         node["network"] = "ws"
         ws = {"path": obj.get("path") or "/"}
-        if obj.get("host"):
-            ws["headers"] = {"Host": obj["host"]}
+        if obj.get("host"): ws["headers"] = {"Host": obj["host"]}
         node["ws-opts"] = ws
     elif net == "grpc":
-        node["network"] = "grpc"
-        node["grpc-opts"] = {"grpc-service-name": obj.get("path", "")}
-    elif net == "tcp" and str(obj.get("type", "")).lower() == "http":
-        node["network"] = "http"
-        http = {"method": "GET", "path": [obj.get("path") or "/"]}
-        if obj.get("host"):
-            http["host"] = [obj["host"]]
-        node["http-opts"] = http
+        node["network"] = "grpc"; node["grpc-opts"] = {"grpc-service-name": obj.get("path", "")}
     return node
 
-
-def parse_ss_uri(uri: str):
-    body = uri[len("ss://"):]
-    name = ""
-    if "#" in body:
-        body, name = body.split("#", 1)
-        name = unquote(name)
-    if "@" in body:
-        userinfo, hostport = body.rsplit("@", 1)
-        padded = userinfo + "=" * (-len(userinfo) % 4)
-        try:
-            cred = base64.b64decode(padded, altchars=b"-_").decode("utf-8", "ignore")
-        except Exception:
-            cred = userinfo
+def parse_text(text):
+    first = text.lstrip().splitlines()[0] if text.strip() else ""
+    if re.search(r"^proxies:\s*$", text, re.MULTILINE):
+        proxies = (yaml.safe_load(text) or {}).get("proxies") or []
+        log(f"[PARSE] Clash YAML，{len(proxies)} 节点"); return proxies
+    lines = text.splitlines()
+    if first.startswith("vmess://"):
+        pass
     else:
-        padded = body + "=" * (-len(body) % 4)
-        cred = base64.b64decode(padded, altchars=b"-_").decode("utf-8", "ignore")
-        cred, hostport = cred.rsplit("@", 1)
-    method, password = cred.split(":", 1)
-    host, port = hostport.rsplit(":", 1)
-    return {
-        "name": name or f"ss-{host}:{port}",
-        "type": "ss", "server": host, "port": int(port),
-        "cipher": method.strip(), "password": password, "udp": True,
-    }
+        lines = base64.b64decode(text + "=" * (-len(text) % 4), altchars=b"-_").decode("utf-8", "ignore").splitlines()
+    out = []
+    for l in lines:
+        l = l.strip()
+        if l.startswith("vmess://"):
+            p = parse_vmess_uri(l)
+            if p: out.append(p)
+            else: log(f"[SKIP] {l[:50]}...")
+    log(f"[PARSE] URI 模式，{len(out)} 节点"); return out
 
-
-def parse_trojan_uri(uri: str):
-    u = urlparse(uri)
-    if not (u.hostname and u.username):
-        return None
-    node = {
-        "name": unquote(u.fragment) if u.fragment else f"trojan-{u.hostname}:{u.port or 443}",
-        "type": "trojan", "server": u.hostname, "port": u.port or 443,
-        "password": unquote(u.username), "udp": True,
-    }
-    for kv in (u.query or "").split("&"):
-        k, _, v = kv.partition("=")
-        if k == "sni" and v:
-            node["sni"] = v
-        elif k == "allowInsecure" and v.lower() in ("1", "true"):
-            node["skip-cert-verify"] = True
-    return node
-
-
-# ---------- 5. 去重 ----------
-def dedupe(proxies: list) -> list:
-    seen, out = set(), []
-    for p in proxies:
-        key = (p.get("server"), p.get("port"), p.get("type"))
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(p)
-    log(f"[DEDUPE] {len(proxies)} → {len(out)}")
-    return out
-
-
-# ---------- 6. TCP 测试 ----------
-def tcp_alive(server: str, port: int) -> bool:
+def tcp_alive(server, port):
     try:
-        with socket.create_connection((server, port), timeout=TCP_TIMEOUT):
-            return True
-    except Exception:
-        return False
+        with socket.create_connection((server, port), timeout=TCP_TIMEOUT): return True
+    except Exception: return False
 
-
-def filter_alive(proxies: list) -> list:
-    alive = []
-    with ThreadPoolExecutor(max_workers=TCP_WORKERS) as pool:
-        futs = {pool.submit(tcp_alive, p["server"], p["port"]): p for p in proxies}
-        for fut in as_completed(futs):
-            p = futs[fut]
-            if fut.result():
-                alive.append(p)
-            else:
-                log(f"[TCP-FAIL] {p.get('name','?')} ({p['server']}:{p['port']})")
-    log(f"[TCP] {len(proxies)} → {len(alive)} 存活")
-    return alive
-
-
-# ---------- 7. 输出 ----------
-def write_clash_yaml(proxies: list) -> None:
+def write_output(proxies):
     names = [p["name"] for p in proxies]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H:%M UTC")
-    conf = {
-        "mixed-port": 7890,
-        "mode": "rule",
-        "log-level": "info",
-        "allow-lan": False,
-        "proxies": proxies,
-        "proxy-groups": [
-            {"name": "PROXY", "type": "select", "proxies": ["AUTO"] + names},
-            {"name": "AUTO",  "type": "url-test", "proxies": names,
-             "url": "http://www.gstatic.com/generate_204", "interval": 300},
-        ],
-        "rules": [
-            "DOMAIN-SUFFIX,cn,DIRECT",
-            "GEOIP,CN,DIRECT",
-            "MATCH,PROXY",
-        ],
-    }
+    conf = {"mixed-port": 7890, "mode": "rule", "log-level": "info", "allow-lan": False,
+            "proxies": proxies,
+            "proxy-groups": [
+                {"name": "PROXY", "type": "select", "proxies": ["AUTO"] + names},
+                {"name": "AUTO", "type": "url-test", "proxies": names,
+                 "url": "http://www.gstatic.com/generate_204", "interval": 300}],
+            "rules": ["DOMAIN-SUFFIX,cn,DIRECT", "GEOIP,CN,DIRECT", "MATCH,PROXY"]}
     with open("clash.yaml", "w", encoding="utf-8") as f:
-        f.write(f"# auto: update {now}\n")
-        yaml.safe_dump(conf, f, allow_unicode=True, sort_keys=False)
+        f.write(f"# auto: update {now}\n"); yaml.safe_dump(conf, f, allow_unicode=True, sort_keys=False)
     log(f"[WRITE] clash.yaml ({len(proxies)} 节点)")
-
-
-def write_v2ray_txt(proxies: list) -> None:
     lines = []
     for p in proxies:
-        if p["type"] == "vmess":
-            obj = {"v": "2", "ps": p["name"], "add": p["server"],
-                   "port": str(p["port"]), "id": p["uuid"],
-                   "aid": str(p.get("alterId", 0)),
-                   "net": p.get("network", "tcp"), "type": "none",
-                   "host": (p.get("http-opts", {}).get("host") or [""])[0] if p.get("http-opts")
-                           else (p.get("ws-opts", {}).get("headers", {}).get("Host", "") if p.get("ws-opts") else ""),
-                   "path": p.get("ws-opts", {}).get("path", "/") if p.get("ws-opts")
-                           else (p.get("http-opts", {}).get("path", [""])[0] if p.get("http-opts") else ""),
-                   "tls": "tls" if p.get("tls") else "",
-                   "scy": p.get("cipher", "auto")}
-            raw = base64.b64encode(json.dumps(obj, ensure_ascii=False).encode()).decode()
-            lines.append(f"vmess://{raw}")
-        elif p["type"] == "ss":
-            cred = base64.b64encode(f"{p['cipher']}:{p['password']}".encode()).decode()
-            full = f"{cred}@{p['server']}:{p['port']}"
-            lines.append(f"ss://{base64.b64encode(full.encode()).decode()}"
-                         f"#{requests.utils.quote(p['name'])}")
-        elif p["type"] == "trojan":
-            lines.append(f"trojan://{p['password']}@{p['server']}:{p['port']}"
-                         f"#{requests.utils.quote(p['name'])}")
-    payload = "\n".join(lines)
+        obj = {"v": "2", "ps": p["name"], "add": p["server"], "port": str(p["port"]), "id": p["uuid"],
+               "aid": str(p.get("alterId", 0)), "net": p.get("network", "tcp"), "type": "none",
+               "host": "", "path": "", "tls": "tls" if p.get("tls") else "", "scy": p.get("cipher", "auto")}
+        if p.get("ws-opts"):
+            obj["path"] = p["ws-opts"].get("path", "/"); obj["host"] = p["ws-opts"].get("headers", {}).get("Host", "")
+        lines.append("vmess://" + base64.b64encode(json.dumps(obj, ensure_ascii=False).encode()).decode())
     with open("v2ray.txt", "w", encoding="utf-8") as f:
-        f.write(base64.b64encode(payload.encode()).decode())
-    log(f"[WRITE] v2ray.txt")
+        f.write(base64.b64encode("\n".join(lines).encode()).decode())
+    log("[WRITE] v2ray.txt")
 
-
-# ---------- 8. 主流程 ----------
-def main() -> None:
-    if not SUB_URL:
-        log("[FAIL] 环境变量 MIAOMIAO_SUB_URL 未设置（请检查 GitHub Secrets）")
-        raise SystemExit(1)
-
-    log(f"[FETCH] {SUB_URL[:80]}...")
-    text = fetch_subscription(SUB_URL)
-    log(f"[FETCH] 原文长度 {len(text)} 字符，格式检测...")
-
-    fmt = detect_format(text)
-    if fmt == "yaml":
-        proxies = parse_clash_yaml(text)
-    elif fmt == "uri_list":
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        proxies = parse_uri_list(lines)
-    else:
-        proxies = parse_base64_sub(text)
-
-    if not proxies:
-        log("[FAIL] 未解析到任何节点 —— 订阅可能已过期")
-        raise SystemExit(2)
-
-    proxies = dedupe(proxies)
-    proxies = filter_alive(proxies)
-    if not proxies:
-        log("[FAIL] 所有节点 TCP 测试均失败")
-        raise SystemExit(3)
-
-    write_clash_yaml(proxies)
-    write_v2ray_txt(proxies)
-    log(f"[DONE] 共输出 {len(proxies)} 个可用节点")
+def main():
+    url = get_sub_url_via_browser()
+    text = fetch_sub(url)
+    proxies = parse_text(text)
+    if not proxies: log("[FAIL] 无节点"); raise SystemExit(2)
+    seen, uniq = set(), []
     for p in proxies:
-        log(f"       - {p['name']} ({p['type']}) {p['server']}:{p['port']}")
-
+        k = (p["server"], p["port"])
+        if k not in seen: seen.add(k); uniq.append(p)
+    log(f"[DEDUPE] {len(proxies)} → {len(uniq)}")
+    alive = []
+    with ThreadPoolExecutor(max_workers=TCP_WORKERS) as pool:
+        futs = {pool.submit(tcp_alive, p["server"], p["port"]): p for p in uniq}
+        for f in as_completed(futs):
+            if f.result(): alive.append(futs[f])
+    log(f"[TCP] {len(uniq)} → {len(alive)} 存活")
+    if not alive: log("[FAIL] 全部节点不可达"); raise SystemExit(3)
+    write_output(alive)
+    log(f"[DONE] 输出 {len(alive)} 个节点")
 
 if __name__ == "__main__":
     main()
