@@ -283,4 +283,35 @@ def main() -> None:
         log("[FAIL] 环境变量 MIAOMIAO_SUB_URL 未设置（请检查 GitHub Secrets）")
         raise SystemExit(1)
 
-    log(f"[FETCH] {SUB_URL[:
+    log(f"[FETCH] {SUB_URL[:80]}...")
+    text = fetch_subscription(SUB_URL)
+    log(f"[FETCH] 原文长度 {len(text)} 字符，格式检测...")
+
+    fmt = detect_format(text)
+    if fmt == "yaml":
+        proxies = parse_clash_yaml(text)
+    elif fmt == "uri_list":
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        proxies = parse_uri_list(lines)
+    else:
+        proxies = parse_base64_sub(text)
+
+    if not proxies:
+        log("[FAIL] 未解析到任何节点 —— 订阅可能已过期")
+        raise SystemExit(2)
+
+    proxies = dedupe(proxies)
+    proxies = filter_alive(proxies)
+    if not proxies:
+        log("[FAIL] 所有节点 TCP 测试均失败")
+        raise SystemExit(3)
+
+    write_clash_yaml(proxies)
+    write_v2ray_txt(proxies)
+    log(f"[DONE] 共输出 {len(proxies)} 个可用节点")
+    for p in proxies:
+        log(f"       - {p['name']} ({p['type']}) {p['server']}:{p['port']}")
+
+
+if __name__ == "__main__":
+    main()
