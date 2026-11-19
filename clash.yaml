@@ -1,38 +1,12 @@
+# auto: update 2026-11-19_05:53 UTC
 mixed-port: 7890
-allow-lan: false
 mode: rule
 log-level: info
+allow-lan: false
 proxies:
-- name: Free VMESS Proxy Server00
-  port: 80
-  uuid: 789f26eb-44c7-531b-87e3-ac49affd9e40
-  server: 139.180.190.156
-  cipher: auto
-  alterId: 0
-  type: vmess
-  network: http
-  http-opts:
-    method: GET
-    path:
-    - /
-    headers:
-      Host:
-      - www.cloudflare.com
-      - www.amazon.com
-      - bing.com
-      User-Agent:
-      - Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)
-        Chrome/55.0.2883.75 Safari/537.36
-      - Mozilla/5.0 (iPhone; CPU iPhone OS 10_0_2 like Mac OS X) AppleWebKit/601.1
-        (KHTML, like Gecko) CriOS/53.0.2785.109 Mobile/14A456 Safari/601.1.46
-      Connection:
-      - keep-alive
-      Accept-Encoding:
-      - gzip
-      - deflate
 - name: Free VMESS Proxy Server01
   port: 80
-  uuid: 9746f77d-cfc4-5b77-b296-7f0a04a64766
+  uuid: d1243f9f-33b0-5edd-8715-5952ca09f1a7
   server: 167.179.90.70
   cipher: auto
   alterId: 0
@@ -57,66 +31,45 @@ proxies:
       Accept-Encoding:
       - gzip
       - deflate
-- cipher: aes-256-cfb
-  name: Free SSR Proxy Server00
-  obfs: http_simple
-  obfs-param: bing.com
-  password: 789f26eb
-  port: 8891
-  protocol: origin
-  protocol-param: ''
+- name: Free VMESS Proxy Server00
+  port: 80
+  uuid: 5f8adc24-9291-5160-bebb-6afe9587148e
   server: 139.180.190.156
-  type: ssr
-- cipher: aes-256-cfb
-  name: Free SSR Proxy Server01
-  obfs: http_simple
-  obfs-param: bing.com
-  password: 9746f77d
-  port: 8892
-  protocol: origin
-  protocol-param: ''
-  server: 167.179.90.70
-  type: ssr
-- cipher: aes-256-cfb
-  name: Free SSR Proxy Server02
-  obfs: http_simple
-  obfs-param: bing.com
-  password: cbec6885
-  port: 8893
-  protocol: origin
-  protocol-param: ''
-  server: 139.180.190.156
-  type: ssr
-- cipher: aes-256-cfb
-  name: Free SSR Proxy Server03
-  obfs: http_simple
-  obfs-param: bing.com
-  password: b2ea206d
-  port: 8894
-  protocol: origin
-  protocol-param: ''
-  server: 167.179.90.70
-  type: ssr
+  cipher: auto
+  alterId: 0
+  type: vmess
+  network: http
+  http-opts:
+    method: GET
+    path:
+    - /
+    headers:
+      Host:
+      - www.cloudflare.com
+      - www.amazon.com
+      - bing.com
+      User-Agent:
+      - Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)
+        Chrome/55.0.2883.75 Safari/537.36
+      - Mozilla/5.0 (iPhone; CPU iPhone OS 10_0_2 like Mac OS X) AppleWebKit/601.1
+        (KHTML, like Gecko) CriOS/53.0.2785.109 Mobile/14A456 Safari/601.1.46
+      Connection:
+      - keep-alive
+      Accept-Encoding:
+      - gzip
+      - deflate
 proxy-groups:
 - name: PROXY
   type: select
   proxies:
   - AUTO
-  - Free VMESS Proxy Server00
   - Free VMESS Proxy Server01
-  - Free SSR Proxy Server00
-  - Free SSR Proxy Server01
-  - Free SSR Proxy Server02
-  - Free SSR Proxy Server03
+  - Free VMESS Proxy Server00
 - name: AUTO
   type: url-test
   proxies:
-  - Free VMESS Proxy Server00
   - Free VMESS Proxy Server01
-  - Free SSR Proxy Server00
-  - Free SSR Proxy Server01
-  - Free SSR Proxy Server02
-  - Free SSR Proxy Server03
+  - Free VMESS Proxy Server00
   url: http://www.gstatic.com/generate_204
   interval: 300
 rules:
