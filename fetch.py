@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""fetch.py — Playwright 打开喵喵网站，自动完成计算题验证，提取订阅链接并抓节点"""
+"""fetch.py (debug版) — Playwright 自动验证 + 失败时导出页面截图/HTML 供分析"""
 
-import re, json, base64, socket, logging
+import re, json, base64, socket, logging, os
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -9,26 +9,65 @@ import requests, yaml
 from playwright.sync_api import sync_playwright
 
 SITE_URL    = "https://www.freeclash.top/"
-SITE_COOKIE = __import__("os").environ.get("FREECLASH_COOKIE", "").strip()
+SITE_COOKIE = os.environ.get("FREECLASH_COOKIE", "").strip()
 TCP_TIMEOUT, TCP_WORKERS = 5, 30
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.info
 
-# ---------- 1. 浏览器打开页面 + 自动做题 ----------
 MATH_RE = re.compile(r"(\d+)\s*([+\-×x*])\s*(\d+)")
 
 def solve_math(text: str):
     m = MATH_RE.search(text)
-    if not m:
-        return None
+    if not m: return None
     a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
     return a + b if op in "+*" else a - b if op == "-" else None
+
+def try_solve_captcha(page):
+    """在页面及所有 iframe 中找计算题并提交"""
+    frames = [page.main_frame] + page.frames
+    for i, fr in enumerate(frames):
+        try:
+            text = fr.inner_text("body")
+        except Exception:
+            continue
+        ans = solve_math(text)
+        inputs = fr.locator("input[type=text], input[type=number], input:not([type])")
+        if ans is not None and inputs.count() > 0:
+            log(f"[CAPTCHA] frame#{i} 检测到计算题，答案: {ans}")
+            inputs.first.fill(str(ans))
+            for sel in ["button:has-text('提交')", "button:has-text('验证')", "button:has-text('确定')",
+                        "button:has-text('GO')", "input[type=submit]", "button"]:
+                try:
+                    if fr.locator(sel).count() > 0:
+                        fr.locator(sel).first.click()
+                        page.wait_for_timeout(3000)
+                        log("[CAPTCHA] 已提交")
+                        return True
+                except Exception:
+                    continue
+    return False
+
+def dump_debug(page, tag="fail"):
+    """保存调试工件"""
+    try:
+        with open("debug_page.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        with open("debug_text.txt", "w", encoding="utf-8") as f:
+            f.write(page.inner_text("body"))
+        page.screenshot(path="debug_screenshot.png", full_page=True)
+        log(f"[DEBUG] 已保存 debug_screenshot.png / debug_page.html / debug_text.txt ({tag})")
+        # 正文前 800 字直接打进日志，方便不下载文件也能看
+        body = page.inner_text("body")
+        log(f"[DEBUG] 页面正文前800字:\n{body[:800]}")
+    except Exception as e:
+        log(f"[DEBUG] 保存失败: {e}")
 
 def get_sub_url_via_browser():
     log("[BROWSER] 启动 Chromium...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0")
+        ctx = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0",
+                                  viewport={"width": 1280, "height": 900})
         if SITE_COOKIE:
             cookies = []
             for kv in SITE_COOKIE.split(";"):
@@ -39,54 +78,46 @@ def get_sub_url_via_browser():
                 ctx.add_cookies(cookies)
                 log(f"[COOKIE] 注入 {len(cookies)} 条")
         page = ctx.new_page()
-        page.goto(SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        page.goto(SITE_URL, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(3000)
 
-        # 找计算题：常见形式是页面出现 "12 + 5 = ?" 和一个输入框 + 提交按钮
-        body_text = page.inner_text("body")
-        answer = solve_math(body_text)
-        if answer is not None and page.locator("input[type=text], input[type=number], input:not([type])").count() > 0:
-            log(f"[CAPTCHA] 检测到计算题，答案: {answer}")
-            box = page.locator("input[type=text], input[type=number], input:not([type])").first
-            box.fill(str(answer))
-            # 找提交按钮
-            for sel in ["button:has-text('提交')", "button:has-text('验证')", "button:has-text('确定')",
-                        "input[type=submit]", "button"]:
-                if page.locator(sel).count() > 0:
-                    page.locator(sel).first.click()
-                    break
-            page.wait_for_timeout(3000)
-            body_text = page.inner_text("body")
-            log("[CAPTCHA] 已提交答案")
-        else:
-            log("[CAPTCHA] 未检测到计算题（可能已被 cookie 放行）")
+        # 第一轮验证
+        if not try_solve_captcha(page):
+            log("[CAPTCHA] 第一轮未检测到计算题")
+        # 有些站点提交后弹第二轮，再试一次
+        page.wait_for_timeout(2000)
+        try_solve_captcha(page)
 
-        # 提取 vmess 订阅链接：优先从页面文本/属性找
-        html = page.content()
-        m = re.search(r'["\'(]([^"\'()]*?/v1/sub/vmess/[^"\'()\s<>]+)', html, re.IGNORECASE)
+        # 遍历所有 frame 找订阅链接
+        html_all, text_all = "", ""
+        for fr in page.frames:
+            try:
+                html_all += fr.content() + "\n"
+                text_all += fr.inner_text("body") + "\n"
+            except Exception:
+                pass
+
+        m = re.search(r'["\'(]([^"\'()]*?/v1/sub/vmess/[^"\'()\s<>]+)', html_all, re.IGNORECASE)
         if not m:
-            # 链接可能由 JS 动态生成，再从渲染后的文本里找
-            m = re.search(r"(https?://[^\s\"'<>]*?/v1/sub/vmess/[^\s\"'<>]+)", body_text, re.IGNORECASE)
+            m = re.search(r"(https?://[^\s\"'<>]*?/v1/sub/vmess/[^\s\"'<>]+)", text_all, re.IGNORECASE)
         if not m:
-            # 最后手段：点击 "复制订阅链接" 按钮，读剪贴板（需授权）
-            page.evaluate("navigator.clipboard.writeText('').catch(()=>{})")
-            btn = page.locator("button:has-text('复制订阅'), a:has-text('复制订阅')").first
-            if btn.count() > 0:
-                ctx.grant_permissions(["clipboard-read", "clipboard-write"])
-                btn.click()
-                page.wait_for_timeout(1000)
-                clip = page.evaluate("navigator.clipboard.readText().catch(()=>'')")
-                m = re.search(r"(https?://[^\s\"']+)", clip or "")
-        browser.close()
+            # 兜底：找任何 /v1/sub/ 链接
+            m = re.search(r'["\'(]([^"\'()]*?/v1/sub/[^"\'()\s<>]+)', html_all, re.IGNORECASE)
         if not m:
-            raise ValueError("验证后仍未找到 /v1/sub/vmess/ 链接")
+            dump_debug(page)
+            browser.close()
+            raise ValueError("验证后仍未找到订阅链接（已保存调试文件）")
+
         url = m.group(1)
+        if not url.startswith("http"):
+            url = "https://www.freeclash.top" + (url if url.startswith("/") else "/" + url)
         exp_m = re.search(r"/v1/sub/vmess/(\d+)/", url)
         exp = datetime.fromtimestamp(int(exp_m.group(1)), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if exp_m else "?"
-        log(f"[BROWSER] 订阅链接（过期 {exp}）: {url[:80]}...")
+        log(f"[BROWSER] 订阅链接（过期 {exp}）: {url[:90]}...")
+        browser.close()
         return url
 
-# ---------- 2~5. 抓取/解析/测试/输出（与之前版本相同） ----------
+# ---------- 以下与之前版本相同 ----------
 def fetch_sub(url):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0 Chrome/120.0"})
@@ -125,9 +156,7 @@ def parse_text(text):
         proxies = (yaml.safe_load(text) or {}).get("proxies") or []
         log(f"[PARSE] Clash YAML，{len(proxies)} 节点"); return proxies
     lines = text.splitlines()
-    if first.startswith("vmess://"):
-        pass
-    else:
+    if not first.startswith("vmess://"):
         lines = base64.b64decode(text + "=" * (-len(text) % 4), altchars=b"-_").decode("utf-8", "ignore").splitlines()
     out = []
     for l in lines:
