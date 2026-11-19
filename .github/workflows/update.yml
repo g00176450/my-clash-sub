@@ -33,7 +33,7 @@ jobs:
 
       - name: Fetch subscription
         env:
-          FREECLASH_COOKIE: ${{ secrets.FREECLASH_COOKIE }}
+          MIAOMIAO_SUB_URL: ${{ secrets.MIAOMIAO_SUB_URL }}
         run: python fetch.py
 
       - name: Commit & Push
