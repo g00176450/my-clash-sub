@@ -1,4 +1,4 @@
-# auto: update 2026-11-19_18:13 UTC
+# auto: update 2026-11-20_02:17 UTC
 mixed-port: 7890
 mode: rule
 log-level: info
@@ -6,7 +6,7 @@ allow-lan: false
 proxies:
 - name: Free VMESS Proxy Server01
   port: 80
-  uuid: cdb28030-8acd-5e91-bb9e-d25997cf9e31
+  uuid: ce84f010-7c7e-55a7-9135-b979b716c31f
   server: 167.179.90.70
   cipher: auto
   alterId: 0
@@ -33,7 +33,7 @@ proxies:
       - deflate
 - name: Free VMESS Proxy Server00
   port: 80
-  uuid: 0d711d5b-4673-50f7-947b-d003110548fc
+  uuid: d8d5f3e0-4cd3-5e21-87a3-3a7d86aeaa4e
   server: 139.180.190.156
   cipher: auto
   alterId: 0
